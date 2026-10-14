@@ -122,3 +122,14 @@ if __name__ == "__main__":
     threading.Thread(target=run_web, daemon=True).start()
     threading.Thread(target=auto_sender, daemon=True).start()
     run_bot()
+    @bot.message_handler(commands=['debug'])
+def send_debug(message):
+    url = "https://app.yasno.ua/api/blackout-service/public/shutdowns/regions/25/dsos/902/planned-outages"
+    try:
+        headers = {"User-Agent": "Mozilla/5.0"}
+        resp = requests.get(url, headers=headers, timeout=10)
+        # Відправляємо сирий JSON, обрізавши його до ліміту повідомлення в ТГ, якщо він завеликий
+        bot.send_message(message.chat.id, f"<code>{resp.text[:4000]}</code>", parse_mode='HTML')
+    except Exception as e:
+        bot.send_message(message.chat.id, f"Помилка debug: {e}")
+
