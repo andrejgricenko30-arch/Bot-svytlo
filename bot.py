@@ -14,6 +14,9 @@ MY_GROUP = "1.1"
 bot = telebot.TeleBot(BOT_TOKEN)
 UA_DAYS = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Нд"]
 
+# Змінна для збереження попереднього стану, щоб не спамити однаковими повідомленнями
+last_sent_status = None
+
 # Веб-сервер для підтримки активності сервісу
 app = Flask(__name__)
 
@@ -114,28 +117,28 @@ def send_debug(message):
     except Exception as e:
         bot.send_message(message.chat.id, f"Помилка debug: {e}")
 
-def auto_sender():
-    send_times = ["08:00", "15:00", "21:00"]
-    
+def monitor_status():
+    global last_sent_status
     while True:
-        now = (datetime.datetime.utcnow() + datetime.timedelta(hours=3)).strftime("%H:%M")
-        if now in send_times:
-            text = get_yasno_schedule()
-            try:
-                bot.send_message(CHAT_ID, text, parse_mode='HTML')
-            except Exception as e:
-                print(f"Помилка авто-відправки HTML: {e}")
-                try:
-                    bot.send_message(CHAT_ID, f"Авто-відправка. Сирі дані:\n\n{text}")
-                except Exception as e2:
-                    print(f"Критична помилка авто-відправки: {e2}")
-            time.sleep(61)
-        time.sleep(1)
+        try:
+            current_text = get_yasno_schedule()
+            
+            # Якщо текст статусу змінився (наприклад, з графіків на екстрені або навпаки)
+            if current_text != last_sent_status:
+                # Перевіряємо, чи це не помилка мережі, щоб не спамити у разі збою інтернету
+                if not current_text.startswith("❌"):
+                    bot.send_message(CHAT_ID, f"⚡ <b>Зміна статусу світла:</b>\n\n{current_text}", parse_mode='HTML')
+                    last_sent_status = current_text
+        except Exception as e:
+            print(f"Помилка в фоновому моніторингу: {e}")
+            
+        # Перевіряємо сайт кожні 5 хвилин (300 секунд)
+        time.sleep(300)
 
 def run_bot():
     bot.infinity_polling()
 
 if __name__ == "__main__":
     threading.Thread(target=run_web, daemon=True).start()
-    threading.Thread(target=auto_sender, daemon=True).start()
+    threading.Thread(target=monitor_status, daemon=True).start()
     run_bot()
