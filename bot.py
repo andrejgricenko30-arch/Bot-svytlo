@@ -6,7 +6,7 @@ import time
 import threading
 from flask import Flask
 
-# Настройки бота
+# Налаштування бота
 BOT_TOKEN = "8780180824:AAFo8ZsKrGp7KXffpTnVYt6eJc3n1Oi2g6I"
 CHAT_ID = "-1003957769146"
 MY_GROUP = "1.1"
@@ -14,12 +14,12 @@ MY_GROUP = "1.1"
 bot = telebot.TeleBot(BOT_TOKEN)
 UA_DAYS = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Нд"]
 
-# Веб-сервер для поддержки активности сервиса
+# Веб-сервер для підтримки активності сервісу
 app = Flask(__name__)
 
 @app.route('/')
 def index():
-    return "Бот YASNO работает 24/7!"
+    return "Бот YASNO працює 24/7!"
 
 def run_web():
     port = int(os.environ.get("PORT", 10000))
@@ -62,15 +62,13 @@ def get_yasno_schedule():
         if response.status_code == 200:
             data = response.json()
             
-            # Перевіряємо, чи є взагалі дані по нашій групі або чи не порожня відповідь
             if not data or MY_GROUP not in data:
-                return "⚠️ **Увага!** Стабілізаційні графіки наразі не діють через застосування аварійних (екстрених) відключень."
+                return "⚠️ <b>Увага!</b> Стабілізаційні графіки наразі не діють через застосування аварійних (екстрених) відключень."
             
             schedule_data = data[MY_GROUP]
             
-            # Якщо ключі today/tomorrow відсутні або порожні через аварійний режим
             if not schedule_data or ('today' not in schedule_data and 'tomorrow' not in schedule_data):
-                return "⚠️ **Увага!** Планові графіки тимчасово недоступні через екстрені/аварійні відключення в Києві."
+                return "⚠️ <b>Увага!</b> Планові графіки тимчасово недоступні через екстрені/аварійні відключення в Києві."
 
             final_text = ""
             if 'today' in schedule_data and schedule_data['today']:
@@ -79,7 +77,7 @@ def get_yasno_schedule():
                 final_text += format_day_schedule(1, schedule_data['tomorrow'])
                 
             if not final_text.strip():
-                return "⚠️ **Увага!** Графіки тимчасово не відображаються через аварійну ситуацію."
+                return "⚠️ <b>Увага!</b> Графіки тимчасово не відображаються через аварійну ситуацію."
                 
             return final_text.strip()
         else:
@@ -89,10 +87,15 @@ def get_yasno_schedule():
 
 @bot.message_handler(commands=['start', 'світло', 'light'])
 def send_schedule(message):
+    text = get_yasno_schedule()
     try:
-        bot.send_message(message.chat.id, get_yasno_schedule(), parse_mode='HTML')
+        bot.send_message(message.chat.id, text, parse_mode='HTML')
     except Exception as e:
-        pass
+        print(f"Помилка відправки HTML: {e}")
+        try:
+            bot.send_message(message.chat.id, f"Помилка форматування повідомлення. Сирі дані:\n\n{text}")
+        except Exception as e2:
+            print(f"Критична помилка відправки: {e2}")
 
 def auto_sender():
     send_times = ["08:00", "15:00", "21:00"]
@@ -100,10 +103,15 @@ def auto_sender():
     while True:
         now = (datetime.datetime.utcnow() + datetime.timedelta(hours=3)).strftime("%H:%M")
         if now in send_times:
+            text = get_yasno_schedule()
             try:
-                bot.send_message(CHAT_ID, get_yasno_schedule(), parse_mode='HTML')
+                bot.send_message(CHAT_ID, text, parse_mode='HTML')
             except Exception as e:
-                pass
+                print(f"Помилка авто-відправки HTML: {e}")
+                try:
+                    bot.send_message(CHAT_ID, f"Авто-відправка. Сирі дані:\n\n{text}")
+                except Exception as e2:
+                    print(f"Критична помилка авто-відправки: {e2}")
             time.sleep(61)
         time.sleep(1)
 
@@ -114,4 +122,3 @@ if __name__ == "__main__":
     threading.Thread(target=run_web, daemon=True).start()
     threading.Thread(target=auto_sender, daemon=True).start()
     run_bot()
-
