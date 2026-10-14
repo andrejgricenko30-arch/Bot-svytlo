@@ -61,20 +61,31 @@ def get_yasno_schedule():
         
         if response.status_code == 200:
             data = response.json()
-            if MY_GROUP in data:
-                schedule_data = data[MY_GROUP]
-                final_text = ""
-                if 'today' in schedule_data:
-                    final_text += format_day_schedule(0, schedule_data['today'])
-                if 'tomorrow' in schedule_data:
-                    final_text += format_day_schedule(1, schedule_data['tomorrow'])
-                return final_text.strip()
-            else:
-                return f"❌ Дані для групи {MY_GROUP} не знайдено."
+            
+            # Перевіряємо, чи є взагалі дані по нашій групі або чи не порожня відповідь
+            if not data or MY_GROUP not in data:
+                return "⚠️ **Увага!** Стабілізаційні графіки наразі не діють через застосування аварійних (екстрених) відключень."
+            
+            schedule_data = data[MY_GROUP]
+            
+            # Якщо ключі today/tomorrow відсутні або порожні через аварійний режим
+            if not schedule_data or ('today' not in schedule_data and 'tomorrow' not in schedule_data):
+                return "⚠️ **Увага!** Планові графіки тимчасово недоступні через екстрені/аварійні відключення в Києві."
+
+            final_text = ""
+            if 'today' in schedule_data and schedule_data['today']:
+                final_text += format_day_schedule(0, schedule_data['today'])
+            if 'tomorrow' in schedule_data and schedule_data['tomorrow']:
+                final_text += format_day_schedule(1, schedule_data['tomorrow'])
+                
+            if not final_text.strip():
+                return "⚠️ **Увага!** Графіки тимчасово не відображаються через аварійну ситуацію."
+                
+            return final_text.strip()
         else:
-            return f"❌ Помилка доступу: {response.status_code}"
+            return f"❌ Помилка доступу до сервісу YASNO: {response.status_code}"
     except Exception as e:
-        return f"❌ Виникла помилка: {e}"
+        return f"❌ Виникла помилка при отриманні графіків: {e}"
 
 @bot.message_handler(commands=['start', 'світло', 'light'])
 def send_schedule(message):
@@ -103,3 +114,4 @@ if __name__ == "__main__":
     threading.Thread(target=run_web, daemon=True).start()
     threading.Thread(target=auto_sender, daemon=True).start()
     run_bot()
+
