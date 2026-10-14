@@ -63,12 +63,19 @@ def get_yasno_schedule():
             data = response.json()
             
             if not data or MY_GROUP not in data:
-                return "⚠️ <b>Увага!</b> Стабілізаційні графіки наразі не діють через застосування аварійних (екстрених) відключень."
+                return "⚠️ <b>Увага!</b> Стабілізаційні графіки наразі не діють."
             
             schedule_data = data[MY_GROUP]
             
             if not schedule_data or ('today' not in schedule_data and 'tomorrow' not in schedule_data):
-                return "⚠️ <b>Увага!</b> Планові графіки тимчасово недоступні через екстрені/аварійні відключення в Києві."
+                return "⚠️ <b>Увага!</b> Планові графіки тимчасово недоступні."
+
+            # Перевірка на екстрені відключення
+            today_status = schedule_data.get('today', {}).get('status', '')
+            tomorrow_status = schedule_data.get('tomorrow', {}).get('status', '')
+            
+            if today_status == "EmergencyShutdowns" or tomorrow_status == "EmergencyShutdowns":
+                return "🚨 <b>Увага! Екстрені відключення, графіки не діють.</b>"
 
             final_text = ""
             if 'today' in schedule_data and schedule_data['today']:
@@ -77,7 +84,7 @@ def get_yasno_schedule():
                 final_text += format_day_schedule(1, schedule_data['tomorrow'])
                 
             if not final_text.strip():
-                return "⚠️ <b>Увага!</b> Графіки тимчасово не відображаються через аварійну ситуацію."
+                return "⚠️ <b>Увага!</b> Графіки тимчасово не відображаються."
                 
             return final_text.strip()
         else:
