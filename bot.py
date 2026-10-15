@@ -1,144 +1,395 @@
+
 import os
+import re
+import time
+import logging
+import threading
+import datetime
+from zoneinfo import ZoneInfo
+
 import requests
 import telebot
-import datetime
-import time
-import threading
-from flask import Flask
+from flask import Flask, jsonify
 
-# Налаштування бота
-BOT_TOKEN = "8780180824:AAFo8ZsKrGp7KXffpTnVYt6eJc3n1Oi2g6I"
-CHAT_ID = "-1003957769146"
-MY_GROUP = "1.1"
+# ==========================================
+# НАЛАШТУВАННЯ
+# ==========================================
 
-bot = telebot.TeleBot(BOT_TOKEN)
-UA_DAYS = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Нд"]
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip()
+CHAT_ID = os.environ.get(
+    "CHAT_ID", "-1003957769146"
+).strip()
+MY_GROUP = os.environ.get("MY_GROUP", "1.1").strip()
 
-# Змінна для збереження попереднього стану, щоб не спамити однаковими повідомленнями
-last_sent_status = None
+KYIV_TZ = ZoneInfo("Europe/Kyiv")
 
-# Веб-сервер для підтримки активності сервісу
+YASNO_URL = (
+    "https://app.yasno.ua/api/blackout-service/public/"
+    "shutdowns/regions/25/dsos/902/planned-outages"
+)
+
+CHECK_INTERVAL = 300
+HTTP_TIMEOUT = (5, 15)
+
+if not BOT_TOKEN:
+    raise RuntimeError(
+        "Не задано BOT_TOKEN у змінних середовища Render"
+    )
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s"
+)
+log = logging.getLogger("yasno_bot")
+
+bot = telebot.TeleBot(
+    BOT_TOKEN,
+    threaded=True,
+    num_threads=4
+)
+
 app = Flask(__name__)
 
-@app.route('/')
+UA_DAYS = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Нд"]
+
+last_sent_status = None
+monitor_lock = threading.Lock()
+
+
+# ==========================================
+# RENDER WEB SERVICE
+# ==========================================
+
+@app.route("/")
 def index():
-    return "Бот YASNO працює 24/7!"
+    return "YASNO Telegram Bot is running!", 200
+
+
+@app.route("/health")
+def health():
+    return jsonify({"status": "ok"}), 200
+
 
 def run_web():
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port)
+    port = int(os.environ.get("PORT", "10000"))
+    app.run(
+        host="0.0.0.0",
+        port=port,
+        debug=False,
+        use_reloader=False,
+        threaded=True
+    )
+
+
+# ==========================================
+# ФОРМАТУВАННЯ ГРАФІКІВ
+# ==========================================
 
 def minutes_to_time(minutes):
-    h = minutes // 60
-    m = minutes % 60
-    return f"{h}:{m:02d}"
+    minutes = int(minutes)
+
+    if not 0 <= minutes <= 1440:
+        raise ValueError("Некоректне значення часу")
+
+    if minutes == 1440:
+        return "24:00"
+
+    return f"{minutes // 60}:{minutes % 60:02d}"
+
 
 def format_day_schedule(day_offset, day_data):
-    if not day_data or 'slots' not in day_data:
+    if not isinstance(day_data, dict):
         return ""
-        
-    target_date = datetime.datetime.utcnow() + datetime.timedelta(hours=3, days=day_offset)
-    day_str = UA_DAYS[target_date.weekday()]
-    
-    title = f"Відключення групи {MY_GROUP} {'сьогодні' if day_offset == 0 else 'завтра'} ({day_str}):"
-    text = f"<b>{title}</b>\n"
+
+    slots = day_data.get("slots")
+    if not isinstance(slots, list):
+        return ""
+
+    target_date = (
+        datetime.datetime.now(KYIV_TZ).date()
+        + datetime.timedelta(days=day_offset)
+    )
+
+    day_name = UA_DAYS[target_date.weekday()]
+    label = "сьогодні" if day_offset == 0 else "завтра"
+
+    lines = [
+        f"<b>Відключення групи {MY_GROUP} "
+        f"{label} ({day_name}):</b>"
+    ]
+
     has_outages = False
-    
-    for slot in day_data['slots']:
-        if slot['type'] in ["Definite", "Possible"]:
-            start = minutes_to_time(slot['start'])
-            end = minutes_to_time(slot['end'])
-            text += f"    🔴 {start} - {end}\n"
-            has_outages = True
-            
+
+    for slot in slots:
+        if not isinstance(slot, dict):
+            continue
+
+        if slot.get("type") not in ("Definite", "Possible"):
+            continue
+
+        try:
+            start = minutes_to_time(slot["start"])
+            end = minutes_to_time(slot["end"])
+        except (KeyError, TypeError, ValueError):
+            log.warning("Пропущено некоректний інтервал")
+            continue
+
+        lines.append(f"🔴 {start} - {end}")
+        has_outages = True
+
     if not has_outages:
-        text += "    🟢 Відключень не планується\n"
-        
-    return text + "\n"
+        lines.append("🟢 Відключень не планується")
+
+    return "\n".join(lines)
+
+
+# ==========================================
+# ОТРИМАННЯ ГРАФІКІВ YASNO
+# ==========================================
 
 def get_yasno_schedule():
-    url = "https://app.yasno.ua/api/blackout-service/public/shutdowns/regions/25/dsos/902/planned-outages"
     try:
-        headers = {"User-Agent": "Mozilla/5.0"}
-        response = requests.get(url, headers=headers, timeout=10)
-        
-        if response.status_code == 200:
-            data = response.json()
-            
-            if not data or MY_GROUP not in data:
-                return "⚠️ <b>Увага!</b> Стабілізаційні графіки наразі не діють."
-            
-            schedule_data = data[MY_GROUP]
-            
-            if not schedule_data or ('today' not in schedule_data and 'tomorrow' not in schedule_data):
-                return "⚠️ <b>Увага!</b> Планові графіки тимчасово недоступні."
+        response = requests.get(
+            YASNO_URL,
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=HTTP_TIMEOUT
+        )
+        response.raise_for_status()
+        data = response.json()
 
-            # Перевірка на екстрені відключення
-            today_status = schedule_data.get('today', {}).get('status', '')
-            tomorrow_status = schedule_data.get('tomorrow', {}).get('status', '')
-            
-            if today_status == "EmergencyShutdowns" or tomorrow_status == "EmergencyShutdowns":
-                return "🚨 <b>Увага! Екстрені відключення, графіки не діють.</b>"
+    except requests.RequestException:
+        log.exception("Помилка запиту до YASNO")
+        return (
+            "❌ Не вдалося отримати графік YASNO. "
+            "Спробуйте пізніше."
+        )
 
-            final_text = ""
-            if 'today' in schedule_data and schedule_data['today']:
-                final_text += format_day_schedule(0, schedule_data['today'])
-            if 'tomorrow' in schedule_data and schedule_data['tomorrow']:
-                final_text += format_day_schedule(1, schedule_data['tomorrow'])
-                
-            if not final_text.strip():
-                return "⚠️ <b>Увага!</b> Графіки тимчасово не відображаються."
-                
-            return final_text.strip()
-        else:
-            return f"❌ Помилка доступу до сервісу YASNO: {response.status_code}"
-    except Exception as e:
-        return f"❌ Виникла помилка при отриманні графіків: {e}"
+    except ValueError:
+        log.exception("YASNO повернув некоректний JSON")
+        return "❌ Сервіс YASNO повернув некоректні дані."
 
-@bot.message_handler(commands=['start', 'світло', 'light'])
-def send_schedule(message):
+    if not isinstance(data, dict):
+        return "❌ Неочікуваний формат відповіді YASNO."
+
+    if MY_GROUP not in data:
+        return (
+            f"⚠️ YASNO не повернув дані для групи {MY_GROUP}.\n"
+            "Це не означає, що відключень немає."
+        )
+
+    schedule = data[MY_GROUP]
+
+    if not isinstance(schedule, dict):
+        return "⚠️ Дані графіка тимчасово недоступні."
+
+    today = schedule.get("today")
+    tomorrow = schedule.get("tomorrow")
+
+    for day_data in (today, tomorrow):
+        if (
+            isinstance(day_data, dict)
+            and day_data.get("status") == "EmergencyShutdowns"
+        ):
+            return (
+                "🚨 <b>Екстрені відключення!</b>\n"
+                "Планові графіки можуть не діяти."
+            )
+
+    parts = []
+
+    if isinstance(today, dict):
+        result = format_day_schedule(0, today)
+        if result:
+            parts.append(result)
+
+    if isinstance(tomorrow, dict):
+        result = format_day_schedule(1, tomorrow)
+        if result:
+            parts.append(result)
+
+    if not parts:
+        return (
+            "⚠️ YASNO поки не надав графік. "
+            "Перевірте пізніше."
+        )
+
+    return "\n\n".join(parts)
+
+
+# ==========================================
+# TELEGRAM: ВІДПРАВЛЕННЯ
+# ==========================================
+
+def send_text(chat_id, text, html=True):
+    try:
+        bot.send_message(
+            chat_id,
+            text,
+            parse_mode="HTML" if html else None
+        )
+        return True
+
+    except Exception:
+        log.exception(
+            "Помилка надсилання повідомлення до чату %s",
+            chat_id
+        )
+        return False
+
+
+def answer_schedule(message):
+    log.info(
+        "Запит графіка від chat_id=%s",
+        message.chat.id
+    )
+
+    try:
+        bot.send_chat_action(message.chat.id, "typing")
+    except Exception:
+        log.warning("Не вдалося надіслати chat action")
+
     text = get_yasno_schedule()
-    try:
-        bot.send_message(message.chat.id, text, parse_mode='HTML')
-    except Exception as e:
-        print(f"Помилка відправки HTML: {e}")
-        try:
-            bot.send_message(message.chat.id, f"Помилка форматування повідомлення. Сирі дані:\n\n{text}")
-        except Exception as e2:
-            print(f"Критична помилка відправки: {e2}")
+    send_text(message.chat.id, text)
 
-@bot.message_handler(commands=['debug'])
-def send_debug(message):
-    url = "https://app.yasno.ua/api/blackout-service/public/shutdowns/regions/25/dsos/902/planned-outages"
+
+# ==========================================
+# КОМАНДИ TELEGRAM
+# ==========================================
+
+@bot.message_handler(commands=["start", "light"])
+def command_schedule(message):
+    answer_schedule(message)
+
+
+@bot.message_handler(commands=["debug"])
+def command_debug(message):
     try:
-        headers = {"User-Agent": "Mozilla/5.0"}
-        resp = requests.get(url, headers=headers, timeout=10)
-        bot.send_message(message.chat.id, f"<code>{resp.text[:4000]}</code>", parse_mode='HTML')
-    except Exception as e:
-        bot.send_message(message.chat.id, f"Помилка debug: {e}")
+        response = requests.get(
+            YASNO_URL,
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=HTTP_TIMEOUT
+        )
+
+        debug_text = (
+            f"HTTP статус: {response.status_code}\n\n"
+            f"Відповідь YASNO:\n{response.text[:3000]}"
+        )
+
+        send_text(message.chat.id, debug_text, html=False)
+
+    except Exception as exc:
+        log.exception("Помилка команди debug")
+        send_text(
+            message.chat.id,
+            f"Помилка debug: {exc}",
+            html=False
+        )
+
+
+# Українська команда обробляється як текст.
+# Для стандартного меню Telegram використовуй /start і /light.
+
+@bot.message_handler(
+    content_types=["text"],
+    func=lambda message: bool(
+        message.text and re.match(
+            r"^/світло(?:@\w+)?(?:\s|$)",
+            message.text.strip(),
+            re.IGNORECASE
+        )
+    )
+)
+def command_light_ukrainian(message):
+    answer_schedule(message)
+
+
+# ==========================================
+# АВТОМАТИЧНИЙ МОНІТОРИНГ
+# ==========================================
 
 def monitor_status():
     global last_sent_status
+
+    log.info("Моніторинг YASNO запущено")
+
     while True:
         try:
             current_text = get_yasno_schedule()
-            
-            # Якщо текст статусу змінився (наприклад, з графіків на екстрені або навпаки)
-            if current_text != last_sent_status:
-                # Перевіряємо, чи це не помилка мережі, щоб не спамити у разі збою інтернету
-                if not current_text.startswith("❌"):
-                    bot.send_message(CHAT_ID, f"⚡ <b>Зміна статусу світла:</b>\n\n{current_text}", parse_mode='HTML')
-                    last_sent_status = current_text
-        except Exception as e:
-            print(f"Помилка в фоновому моніторингу: {e}")
-            
-        # Перевіряємо сайт кожні 5 хвилин (300 секунд)
-        time.sleep(300)
 
-def run_bot():
-    bot.infinity_polling()
+            # Помилки та непідтверджені дані не вважаємо зміною.
+            if current_text.startswith(("❌", "⚠️")):
+                log.warning(
+                    "Графік не підтверджено; повідомлення пропущено"
+                )
+
+            else:
+                with monitor_lock:
+                    if last_sent_status is None:
+                        # Перший успішний запит встановлює початковий стан.
+                        last_sent_status = current_text
+                        log.info("Початковий графік збережено")
+
+                    elif current_text != last_sent_status:
+                        notification = (
+                            "⚡ <b>Зміна графіка світла!</b>\n\n"
+                            + current_text
+                        )
+
+                        if send_text(CHAT_ID, notification):
+                            last_sent_status = current_text
+                            log.info(
+                                "Повідомлення про зміну графіка надіслано"
+                            )
+
+        except Exception:
+            log.exception("Помилка моніторингу")
+
+        time.sleep(CHECK_INTERVAL)
+
+
+# ==========================================
+# ЗАПУСК
+# ==========================================
+
+def main():
+    # Web server для Render
+    threading.Thread(
+        target=run_web,
+        daemon=True,
+        name="web-server"
+    ).start()
+
+    # Фоновий моніторинг графіків
+    threading.Thread(
+        target=monitor_status,
+        daemon=True,
+        name="yasno-monitor"
+    ).start()
+
+    # Polling та webhook не повинні працювати одночасно.
+    try:
+        bot.remove_webhook()
+        log.info("Webhook видалено")
+    except Exception:
+        log.exception("Не вдалося видалити webhook")
+
+    # Повторне підключення після тимчасових помилок.
+    while True:
+        try:
+            log.info("Запуск Telegram polling")
+
+            bot.infinity_polling(
+                timeout=20,
+                long_polling_timeout=15,
+                skip_pending=False
+            )
+
+        except Exception:
+            log.exception(
+                "Помилка Telegram polling. Повтор через 5 секунд"
+            )
+            time.sleep(5)
+
 
 if __name__ == "__main__":
-    threading.Thread(target=run_web, daemon=True).start()
-    threading.Thread(target=monitor_status, daemon=True).start()
-    run_bot()
+    main()
