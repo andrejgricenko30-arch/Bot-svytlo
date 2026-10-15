@@ -15,9 +15,9 @@ from flask import Flask, jsonify
 # НАЛАШТУВАННЯ
 # ==========================================
 
-BOT_TOKEN ="8780180824:AAEMoUENc6KumIjKBy-ateeMPE27Nlgqa7s"
-CHAT_ID =-1003957769146
-MY_GROUP =  "1.1"
+BOT_TOKEN = "8780180824:AAEMoUENc6KumIjKBy-ateeMPE27Nlgqa7s"
+CHAT_ID = -1003957769146
+MY_GROUP = "1.1"
 
 KYIV_TZ = ZoneInfo("Europe/Kyiv")
 
@@ -29,10 +29,8 @@ YASNO_URL = (
 CHECK_INTERVAL = 300
 HTTP_TIMEOUT = (5, 15)
 
-if not BOT_TOKEN:
-    raise RuntimeError(
-        "Не задано BOT_TOKEN у змінних середовища Render"
-    )
+if not BOT_TOKEN or BOT_TOKEN.startswith("ВСТАВ_"):
+    raise RuntimeError("Вкажи свій поточний BOT_TOKEN")
 
 logging.basicConfig(
     level=logging.INFO,
@@ -132,11 +130,11 @@ def format_day_schedule(day_offset, day_data):
             log.warning("Пропущено некоректний інтервал")
             continue
 
-        lines.append(f"🔴 {start} - {end}")
+        lines.append(f"🌧️ {start} - {end}")
         has_outages = True
 
     if not has_outages:
-        lines.append("🟢 Відключень не планується")
+        lines.append("☀️ Відключень не планується")
 
     return "\n".join(lines)
 
@@ -236,10 +234,7 @@ def send_text(chat_id, text, html=True):
 
 
 def answer_schedule(message):
-    log.info(
-        "Запит графіка від chat_id=%s",
-        message.chat.id
-    )
+    log.info("Запит графіка від chat_id=%s", message.chat.id)
 
     try:
         bot.send_chat_action(message.chat.id, "typing")
@@ -284,9 +279,6 @@ def command_debug(message):
         )
 
 
-# Українська команда обробляється як текст.
-# Для стандартного меню Telegram використовуй /start і /light.
-
 @bot.message_handler(
     content_types=["text"],
     func=lambda message: bool(
@@ -310,34 +302,122 @@ def monitor_status():
 
     log.info("Моніторинг YASNO запущено")
 
+    # Часові позначки обов'язкових зведень.
+    # Зберігаються в пам'яті до перезапуску процесу.
+    daily_sent_slots = set()
+
     while True:
         try:
             current_text = get_yasno_schedule()
+            now = datetime.datetime.now(KYIV_TZ)
 
-            # Помилки та непідтверджені дані не вважаємо зміною.
+            # ======================================
+            # 1. ЗВЕДЕННЯ О 15:00 ТА 21:00
+            # ======================================
+
+            for target_hour in (15, 21):
+                slot_key = (now.date(), target_hour)
+
+                if (
+                    now.hour == target_hour
+                    and slot_key not in daily_sent_slots
+                ):
+                    # Якщо YASNO підтвердив екстрений статус,
+                    # тут буде повідомлення про екстрені відключення.
+                    # Якщо даних немає, надсилаємо попередження.
+                    if send_text(CHAT_ID, current_text):
+                        daily_sent_slots.add(slot_key)
+                        log.info(
+                            "Обов'язкове зведення за %02d:00 надіслано",
+                            target_hour
+                        )
+                    else:
+                        log.warning(
+                            "Зведення за %02d:00 не надіслано. "
+                            "Повторна спроба під час наступної перевірки",
+                            target_hour
+                        )
+
+            # ======================================
+            # 2. НЕ РОБИМО ВИСНОСКІВ ЗА ПОМИЛКАМИ
+            # ======================================
+
             if current_text.startswith(("❌", "⚠️")):
                 log.warning(
-                    "Графік не підтверджено; повідомлення пропущено"
+                    "Дані YASNO не підтверджені. "
+                    "Попередній стан зберігаємо"
                 )
 
             else:
                 with monitor_lock:
+
+                    # ======================================
+                    # 3. ПЕРШИЙ УСПІШНИЙ ЗАПИТ
+                    # ======================================
+
                     if last_sent_status is None:
-                        # Перший успішний запит встановлює початковий стан.
-                        last_sent_status = current_text
-                        log.info("Початковий графік збережено")
+
+                        if current_text.startswith("🚨"):
+                            # Якщо бот стартував під час екстрених
+                            # відключень, повідомляємо про них.
+                            if send_text(CHAT_ID, current_text):
+                                last_sent_status = current_text
+                                log.info(
+                                    "Надіслано початкове повідомлення "
+                                    "про екстрені відключення"
+                                )
+                        else:
+                            # Звичайний графік запам'ятовуємо,
+                            # не надсилаючи зайвого повідомлення
+                            # відразу після запуску.
+                            last_sent_status = current_text
+                            log.info("Початковий графік збережено")
+
+                    # ======================================
+                    # 4. ЗМІНА СТАНУ
+                    # ======================================
 
                     elif current_text != last_sent_status:
-                        notification = (
-                            "⚡ <b>Зміна графіка світла!</b>\n\n"
-                            + current_text
+
+                        previous_emergency = (
+                            last_sent_status.startswith("🚨")
+                        )
+                        current_emergency = (
+                            current_text.startswith("🚨")
                         )
 
+                        if current_emergency:
+                            notification = current_text
+
+                        elif previous_emergency:
+                            notification = (
+                                "✅ <b>Екстрені відключення завершились!</b>\n\n"
+                                "Актуальний графік YASNO:\n\n"
+                                + current_text
+                            )
+
+                        else:
+                            notification = (
+                                "⚡ <b>Зміна графіка світла!</b>\n\n"
+                                + current_text
+                            )
+
+                        # Оновлюємо стан тільки після успішної
+                        # відправки повідомлення.
                         if send_text(CHAT_ID, notification):
                             last_sent_status = current_text
-                            log.info(
-                                "Повідомлення про зміну графіка надіслано"
+                            log.info("Зміну графіка надіслано")
+                        else:
+                            log.warning(
+                                "Не вдалося повідомити про зміну. "
+                                "Повторимо спробу"
                             )
+
+            # Видаляємо часові позначки попередніх днів.
+            daily_sent_slots = {
+                key for key in daily_sent_slots
+                if key[0] >= now.date()
+            }
 
         except Exception:
             log.exception("Помилка моніторингу")
@@ -350,28 +430,24 @@ def monitor_status():
 # ==========================================
 
 def main():
-    # Web server для Render
     threading.Thread(
         target=run_web,
         daemon=True,
         name="web-server"
     ).start()
 
-    # Фоновий моніторинг графіків
     threading.Thread(
         target=monitor_status,
         daemon=True,
         name="yasno-monitor"
     ).start()
 
-    # Polling та webhook не повинні працювати одночасно.
     try:
         bot.remove_webhook()
         log.info("Webhook видалено")
     except Exception:
         log.exception("Не вдалося видалити webhook")
 
-    # Повторне підключення після тимчасових помилок.
     while True:
         try:
             log.info("Запуск Telegram polling")
