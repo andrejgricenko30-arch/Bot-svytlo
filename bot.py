@@ -15,11 +15,9 @@ from flask import Flask, jsonify
 # НАЛАШТУВАННЯ
 # ==========================================
 
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip()
-CHAT_ID = os.environ.get(
-    "CHAT_ID", "-1003957769146"
-).strip()
-MY_GROUP = os.environ.get("MY_GROUP", "1.1").strip()
+BOT_TOKEN ="8780180824:AAEMoUENc6KumIjKBy-ateeMPE27Nlgqa7s"
+CHAT_ID =-1003957769146
+MY_GROUP =  "1.1"
 
 KYIV_TZ = ZoneInfo("Europe/Kyiv")
 
