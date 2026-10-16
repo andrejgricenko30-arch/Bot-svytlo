@@ -1,30 +1,5 @@
 
-import os
-import re
-import time
-import logging
-import threading
-import datetime
-from zoneinfo import ZoneInfo
 
-import requests
-import telebot
-from flask import Flask, jsonify
-
-# ==========================================
-# НАЛАШТУВАННЯ
-# ==========================================
-
-BOT_TOKEN = "8780180824:AAEMoUENc6KumIjKBy-ateeMPE27Nlgqa7s"
-CHAT_ID = -1003957769146
-MY_GROUP = "1.1"
-
-KYIV_TZ = ZoneInfo("Europe/Kyiv")
-
-YASNO_URL = (
-    "https://app.yasno.ua/api/blackout-service/public/"
-    "shutdowns/regions/25/dsos/902/planned-outages"
-)
 
 CHECK_INTERVAL = 300
 HTTP_TIMEOUT = (5, 15)
